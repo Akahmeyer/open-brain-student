@@ -138,6 +138,8 @@
     .thought-time { font-size: 0.72rem; color: #444; }
     .more { background: none; border: none; color: #818cf8; font-size: 0.75rem; padding: 0; }
     .more:hover:not(:disabled) { background: none; text-decoration: underline; }
+    .more.del { color: #666; margin-left: 12px; }
+    .more.del:hover:not(:disabled) { color: #ef4444; }
     mark { background: #3b3b8f; color: #fff; border-radius: 2px; padding: 0 1px; }
     .empty { color: #444; font-size: 0.875rem; text-align: center; padding: 40px 0; }
     .search-row { display: flex; gap: 8px; }
@@ -422,13 +424,24 @@
           <div class="thought-text${long ? ' clamped' : ''}">${highlight(t.content, term)}</div>
           <div class="thought-foot">
             <span class="thought-time">${fmt(t.created_at)}</span>
-            ${long ? '<button class="more">Show more</button>' : ''}
+            <span>
+              ${long ? '<button class="more">Show more</button>' : ''}
+              <button class="more del" data-id="${esc(t.id)}">Delete</button>
+            </span>
           </div>
         </div>`
     }).join('')
   }
 
-  document.addEventListener('click', e => {
+  document.addEventListener('click', async e => {
+    if (e.target.classList.contains('del')) {
+      if (!confirm('Delete this thought for good? This cannot be undone.')) return
+      e.target.disabled = true
+      const { error } = await db.from('thoughts').delete().eq('id', e.target.dataset.id)
+      if (error) { alert('Could not delete: ' + error.message); e.target.disabled = false; return }
+      e.target.closest('.thought').remove()
+      return
+    }
     if (!e.target.classList.contains('more')) return
     const text = e.target.closest('.thought').querySelector('.thought-text')
     const clamped = text.classList.toggle('clamped')
@@ -715,15 +728,34 @@
     return m ? m[1] : null
   }
 
-  // Copied transcripts come with timestamp lines ("1:23", "1 minute, 23 seconds").
-  // Strip those and join the rest into readable text.
+  // Copied transcripts come with timestamps, and YouTube adds a spoken
+  // version right after each one, often glued to the next word:
+  //   "0:08" + "8 seconds" + "in their..."  ->  "0:088 secondsin their..."
+  // We read the numbers from the timestamp and only strip the spoken part
+  // when its numbers match, so a real "3:30" in the text is left alone.
+  const UNIT = '\\d+\\s*(?:hours?|minutes?|seconds?|horas?|minutos?|segundos?)'
+  const STAMP = new RegExp('(?<![\\d:])(\\d{1,2}(?::\\d{2}){1,2})((?:\\s*' + UNIT +
+    ')(?:(?:,\\s*|\\s+y\\s+|\\s+)' + UNIT + ')*)?', 'gi')
+
+  function stripStamp(match, stamp, spoken) {
+    if (!spoken) return match
+    const parts = stamp.split(':').map(Number)
+    while (parts.length < 3) parts.unshift(0)
+    let expected = parts.filter(n => n > 0)
+    if (!expected.length) expected = [0]
+    const said = spoken.match(/\d+/g).map(Number)
+    if (said.join() !== expected.join()) return match
+    // "1 second" glued to "so..." looks like "1 secondso". Give back the s.
+    const giveBack = said[said.length - 1] === 1 && /s$/i.test(spoken) ? spoken.slice(-1) : ''
+    return ' ' + giveBack
+  }
+
   function cleanTranscript(raw) {
     return decodeEntities(raw)
+      .replace(STAMP, stripStamp)
       .split(/\r?\n/)
       .map(l => l.trim())
-      .filter(l => l
-        && !/^\d{1,2}(:\d{2}){1,2}$/.test(l)
-        && !/^(\d+\s+(hours?|minutes?|seconds?|horas?|minutos?|segundos?),?\s*(y\s+)?)+$/i.test(l))
+      .filter(l => l && !/^\d{1,2}(:\d{2}){1,2}$/.test(l))
       .join(' ')
       .replace(/\s+/g, ' ')
       .trim()
