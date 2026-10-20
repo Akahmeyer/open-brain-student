@@ -1,0 +1,4 @@
+# Local Supabase CLI state — not code, never commit
+.branches
+.temp
+.env*

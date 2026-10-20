@@ -238,7 +238,7 @@
     <section class="panel" id="panel-youtube">
       <div class="card">
         <h2>YouTube transcript</h2>
-        <p class="help">Paste a video link. Your app can't fetch YouTube subtitles by itself yet (that becomes automatic in Level 3), so for now you copy the transcript from YouTube and paste it here.</p>
+        <p class="help">Paste a video link, look it up, then tap <b>Capture automatically</b>. Your capture-youtube function fetches the transcript on the server. If a video won't cooperate, you can still paste the transcript in by hand.</p>
         <label class="field" for="ytUrl">YouTube link</label>
         <input type="url" id="ytUrl" placeholder="https://www.youtube.com/watch?v=...">
         <div class="row">
@@ -252,8 +252,12 @@
         </div>
 
         <div class="yt-steps" id="ytSteps">
+          <div class="row" style="margin-top:16px">
+            <button id="ytAutoBtn">⚡ Capture automatically</button>
+            <span class="msg" id="ytAutoMsg"></span>
+          </div>
           <div class="help" style="margin-top:16px">
-            <b>How to copy the transcript:</b>
+            <b>If automatic capture doesn't work, copy the transcript by hand:</b>
             <ol>
               <li>Click <b>Get Transcript</b> below. The video opens in a new tab.</li>
               <li>Under the video, click the description (<b>...more</b>), scroll down and click <b>Show transcript</b>. On a phone, tap the description, then <b>Show transcript</b>.</li>
@@ -300,11 +304,11 @@
     <section class="panel" id="panel-url">
       <div class="card">
         <h2>Web article</h2>
-        <p class="help">Browsers don't let one website download another website's pages, for security reasons. So for now: open the article, select its text, copy it, and paste it below. In Level 3 this becomes automatic.</p>
+        <p class="help">Paste a link and tap <b>Save to Brain</b>. Your capture-url function fetches the article on the server, where the browser's security rule doesn't apply. Some sites block automated readers or build their pages with JavaScript; for those, paste the article text below as well.</p>
         <label class="field" for="webUrl">Article link</label>
         <input type="url" id="webUrl" placeholder="https://...">
-        <label class="field" for="webText">Article text</label>
-        <textarea id="webText" placeholder="Paste the article text here..." style="min-height:180px"></textarea>
+        <label class="field" for="webText">Article text (optional)</label>
+        <textarea id="webText" placeholder="Leave empty to fetch the article automatically, or paste its text here if a site blocks that..." style="min-height:180px"></textarea>
         <div class="row">
           <button id="webSaveBtn">Save to Brain</button>
           <span class="msg" id="webMsg"></span>
@@ -721,6 +725,25 @@
   // ---------------------------------------------------------------------------
   let yt = null // { id, title }
 
+  // Ask one of your edge functions to capture a link on the server. Your
+  // login token is sent along automatically, so the function knows whose
+  // brain to save into. On failure, use the function's own explanation.
+  async function captureOnServer(fn, url) {
+    if (!user) throw new Error('You are signed out. Sign in again.')
+    const { data, error } = await db.functions.invoke(fn, { body: { url } })
+    if (error) {
+      let msg = error.message
+      try {
+        const body = await error.context.json()
+        if (body && body.error) msg = body.error
+      } catch {}
+      throw new Error(msg)
+    }
+    if (!data || !data.ok) throw new Error((data && data.error) || 'Capture failed')
+    loadRecent()
+    return data
+  }
+
   function youtubeId(input) {
     const s = (input || '').trim()
     if (/^[A-Za-z0-9_-]{11}$/.test(s)) return s
@@ -765,6 +788,7 @@
     const id = youtubeId($('ytUrl').value)
     if (!id) { setMsg('ytLookupMsg', 'That doesn\'t look like a YouTube link.', 'err'); return }
     setMsg('ytLookupMsg', 'Looking up...', 'info')
+    setMsg('ytAutoMsg', '')
     let title = 'YouTube video ' + id
     let thumb = 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg'
     try {
@@ -788,6 +812,33 @@
     $('ytOpenBtn').href = 'https://www.youtube.com/watch?v=' + id
   })
   $('ytUrl').addEventListener('keydown', e => { if (e.key === 'Enter') $('ytLoadBtn').click() })
+
+  $('ytAutoBtn').addEventListener('click', async () => {
+    if (!yt) { setMsg('ytAutoMsg', 'Look up the video first.', 'err'); return }
+    const btn = $('ytAutoBtn')
+    btn.disabled = true
+    btn.textContent = 'Fetching transcript...'
+    setMsg('ytAutoMsg', 'This can take up to 30 seconds.', 'info')
+    try {
+      const r = await captureOnServer('capture-youtube', 'https://www.youtube.com/watch?v=' + yt.id)
+      $('ytUrl').value = ''
+      $('ytPreview').style.display = 'none'
+      $('ytSteps').style.display = 'none'
+      yt = null
+      // Say plainly when only the description was available, so a thin
+      // capture never passes for the real transcript
+      if (r.has_transcript) {
+        setMsg('ytLookupMsg', '✓ Saved the transcript (' + r.chars.toLocaleString() + ' characters)', 'ok')
+      } else {
+        setMsg('ytLookupMsg', '⚠ Saved, but YouTube gave no transcript, so only the video description was captured.', 'info')
+      }
+    } catch (e) {
+      setMsg('ytAutoMsg', '✗ ' + e.message, 'err')
+    } finally {
+      btn.disabled = false
+      btn.textContent = '⚡ Capture automatically'
+    }
+  })
 
   $('ytSaveBtn').addEventListener('click', async () => {
     if (!yt) { setMsg('ytMsg', 'Look up the video first.', 'err'); return }
@@ -886,9 +937,10 @@
     if (!url) { setMsg('webMsg', 'Add the article link.', 'err'); return }
     if (!/^https?:\/\//i.test(url)) url = 'https://' + url
     try { new URL(url) } catch { setMsg('webMsg', 'That link doesn\'t look right.', 'err'); return }
-    if (!text) { setMsg('webMsg', 'Paste the article text.', 'err'); return }
     await runSave('webSaveBtn', 'webMsg', async () => {
-      await saveThought('🔗 URL: ' + url + '\n\n' + text, { url }, { text, kind: 'web' })
+      // Text pasted by hand wins; otherwise the server fetches the page
+      if (text) await saveThought('🔗 URL: ' + url + '\n\n' + text, { url }, { text, kind: 'web' })
+      else await captureOnServer('capture-url', url)
       $('webUrl').value = ''
       $('webText').value = ''
     })
